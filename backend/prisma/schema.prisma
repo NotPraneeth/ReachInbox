@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String     @id @default(uuid())
+  googleId  String     @unique
+  email     String     @unique
+  name      String
+  avatarUrl String?
+  createdAt DateTime   @default(now())
+  senders   Sender[]
+  campaigns Campaign[]
+}
+
+model Sender {
+  id          String         @id @default(uuid())
+  userId      String
+  user        User           @relation(fields: [userId], references: [id])
+  displayName String
+  email       String
+  smtpHost    String         @default("smtp.ethereal.email")
+  smtpPort    Int            @default(587)
+  smtpUser    String
+  smtpPass    String
+  createdAt   DateTime       @default(now())
+  messages    EmailMessage[]
+
+  @@index([userId])
+}
+
+model Campaign {
+  id                    String         @id @default(uuid())
+  userId                String
+  user                  User           @relation(fields: [userId], references: [id])
+  senderId              String
+  subject               String
+  bodyHtml              String         @db.Text
+  startTime             DateTime
+  delayBetweenEmailsSec Int
+  hourlyLimit           Int
+  totalRecipients       Int
+  createdAt             DateTime       @default(now())
+  messages              EmailMessage[]
+}
+
+enum MessageStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+model EmailMessage {
+  id             String        @id @default(uuid())
+  campaignId     String
+  campaign       Campaign      @relation(fields: [campaignId], references: [id])
+  senderId       String
+  sender         Sender        @relation(fields: [senderId], references: [id])
+  recipientEmail String
+  status         MessageStatus @default(PENDING)
+  scheduledAt    DateTime
+  sentAt         DateTime?
+  failReason     String?
+  attemptCount   Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([status, scheduledAt])
+  @@index([senderId, scheduledAt])
+  @@index([campaignId])
+}
