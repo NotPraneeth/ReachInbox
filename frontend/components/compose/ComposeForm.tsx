@@ -1,13 +1,13 @@
 "use client";
 
-import { Send } from "lucide-react";
+import { CalendarClock, Send } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { CsvUploader } from "@/components/compose/CsvUploader";
 import { RecipientChips } from "@/components/compose/RecipientChips";
 import { RichTextEditor } from "@/components/compose/RichTextEditor";
-import { SendLaterPopover } from "@/components/compose/SendLaterPopover";
+import { ScheduleModal } from "@/components/compose/ScheduleModal";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { api, ApiError } from "@/lib/apiClient";
@@ -25,8 +25,7 @@ export function ComposeForm() {
   const [bodyHtml, setBodyHtml] = useState("");
   const [delaySec, setDelaySec] = useState("");
   const [hourlyLimit, setHourlyLimit] = useState("");
-  const [sendAt, setSendAt] = useState<Date>(() => new Date(Date.now() + 5 * 60_000));
-  const [sendLaterOpen, setSendLaterOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -74,14 +73,14 @@ export function ComposeForm() {
       next.hourly = `Allowed: ${defaults.hourlyLimit.min}–${defaults.hourlyLimit.max} per hour`;
     }
 
-    if (sendAt.getTime() <= Date.now()) next.sendAt = "Send time must be in the future";
-
     setErrors(next);
     return Object.keys(next).length === 0;
   };
 
-  const submit = async () => {
+  const submit = async (mode: "now" | "scheduled", startTime?: Date) => {
     if (!validate() || !senders) return;
+    const resolvedStart =
+      mode === "scheduled" ? startTime ?? new Date() : new Date();
     setSubmitting(true);
     try {
       const result = await api.createCampaign({
@@ -89,14 +88,16 @@ export function ComposeForm() {
         subject: subject.trim(),
         bodyHtml,
         recipients,
-        startTime: sendAt.toISOString(),
+        startTime: resolvedStart.toISOString(),
         delayBetweenEmailsSec: Number(delaySec),
         hourlyLimit: Number(hourlyLimit),
       });
       toast.success(
-        `${result.totalRecipients} emails scheduled from ${new Date(
-          result.firstScheduledAt,
-        ).toLocaleString()}`,
+        mode === "now"
+          ? `${result.totalRecipients} emails sending now, paced at ${delaySec}s and capped at ${hourlyLimit}/hr`
+          : `${result.totalRecipients} emails scheduled from ${new Date(
+              result.firstScheduledAt,
+            ).toLocaleString()}`,
       );
       router.push("/dashboard/scheduled");
     } catch (e) {
@@ -234,23 +235,32 @@ export function ComposeForm() {
           />
         </div>
 
-        {errors.sendAt && <p className="text-xs text-red-600">{errors.sendAt}</p>}
-
         <div className="flex items-center justify-end gap-2 border-t border-chrome-200 pt-4">
-          <SendLaterPopover
-            value={sendAt}
-            onChange={setSendAt}
-            open={sendLaterOpen}
-            onOpenChange={setSendLaterOpen}
-          />
           <Button
-            onClick={submit}
+            variant="secondary"
+            onClick={() => setScheduleOpen(true)}
+            disabled={submitting}
+          >
+            <CalendarClock className="h-4 w-4" />
+            Schedule
+          </Button>
+          <Button
+            onClick={() => submit("now")}
             loading={submitting}
             disabled={submitting}
           >
             <Send className="h-4 w-4" />
             Send now
           </Button>
+          <ScheduleModal
+            open={scheduleOpen}
+            onOpenChange={setScheduleOpen}
+            onConfirm={(time) => {
+              setScheduleOpen(false);
+              void submit("scheduled", time);
+            }}
+            submitting={submitting}
+          />
         </div>
       </div>
     </div>
