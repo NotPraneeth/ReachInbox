@@ -41,7 +41,12 @@ describe("rateLimiter — concurrent slot reservation (integration, requires Red
 
   beforeAll(async () => {
     try {
-      await redis.ping();
+      await Promise.race([
+        redis.ping(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("redis ping timeout")), 1500),
+        ),
+      ]);
       redisReady = true;
     } catch {
       console.warn(
