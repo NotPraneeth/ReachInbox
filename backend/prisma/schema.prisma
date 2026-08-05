@@ -69,6 +69,7 @@ model EmailMessage {
   scheduledAt    DateTime
   sentAt         DateTime?
   failReason     String?
+  testMessageUrl String?
   attemptCount   Int           @default(0)
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt

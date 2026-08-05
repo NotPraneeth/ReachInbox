@@ -1,7 +1,7 @@
 "use client";
 
 import { format } from "@/lib/format";
-import { CalendarX2, Trash2 } from "lucide-react";
+import { CalendarX2, ExternalLink, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { StatusBadge } from "@/components/emails/StatusBadge";
@@ -41,6 +41,17 @@ export function EmailRow({ email, onCancelled }: EmailRowProps) {
         <span>{format.relative(email.scheduledAt)}</span>
       </div>
       <StatusBadge status={email.status} />
+      {email.status === "SENT" && email.testMessageUrl && (
+        <a
+          href={email.testMessageUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="View email in Ethereal"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-chrome-400 hover:bg-chrome-100 hover:text-chrome-600 transition-colors"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+        </a>
+      )}
       {email.status === "PENDING" && (
         <Button
           variant="ghost"

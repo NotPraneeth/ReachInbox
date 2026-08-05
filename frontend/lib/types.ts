@@ -33,6 +33,7 @@ export interface EmailMessage {
   scheduledAt: string;
   sentAt: string | null;
   failReason: string | null;
+  testMessageUrl: string | null;
   attemptCount: number;
   subject: string;
   senderName: string;

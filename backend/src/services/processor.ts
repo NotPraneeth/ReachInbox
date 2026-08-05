@@ -59,7 +59,7 @@ export async function processMessage(
 
     await prisma.emailMessage.update({
       where: { id: message.id },
-      data: { status: "SENT", sentAt: new Date() },
+      data: { status: "SENT", sentAt: new Date(), testMessageUrl: result.testMessageUrl },
     });
 
     console.log(

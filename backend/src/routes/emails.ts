@@ -75,6 +75,7 @@ async function listEmails(
       subject: m.campaign.subject,
       senderName: m.sender.displayName,
       senderEmail: m.sender.email,
+      testMessageUrl: m.testMessageUrl,
     })),
     page,
     pageSize,
