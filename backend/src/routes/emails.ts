@@ -26,6 +26,7 @@ async function listEmails(
   req: Request,
   res: Response,
   defaultStatuses: MessageStatus[],
+  sort: "asc" | "desc" = "desc",
 ) {
   const { page, pageSize, skip } = pageParams(req.query);
   const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
@@ -56,7 +57,7 @@ async function listEmails(
         campaign: { select: { subject: true } },
         sender: { select: { displayName: true, email: true } },
       },
-      orderBy: { scheduledAt: "desc" },
+      orderBy: { scheduledAt: sort },
       skip,
       take: pageSize,
     }),
@@ -85,11 +86,11 @@ async function listEmails(
 }
 
 router.get("/emails/scheduled", requireAuth, (req, res) => {
-  return listEmails(req, res, [MessageStatus.PENDING, MessageStatus.PROCESSING]);
+  return listEmails(req, res, [MessageStatus.PENDING, MessageStatus.PROCESSING], "asc");
 });
 
 router.get("/emails/sent", requireAuth, (req, res) => {
-  return listEmails(req, res, [MessageStatus.SENT, MessageStatus.FAILED]);
+  return listEmails(req, res, [MessageStatus.SENT, MessageStatus.FAILED], "desc");
 });
 
 router.get("/emails/counts", requireAuth, async (req, res) => {

@@ -24,7 +24,7 @@ export default function DashboardLayout({
   }
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex h-dvh overflow-hidden">
       <Sidebar user={user} />
       <main className="flex-1 overflow-y-auto px-8 py-6">{children}</main>
     </div>

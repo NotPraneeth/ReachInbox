@@ -39,6 +39,7 @@ export function EmailRow({ email, onCancelled }: EmailRowProps) {
       <div className="hidden shrink-0 flex-col text-right text-xs text-chrome-400 md:flex">
         <span>{email.senderName}</span>
         <span>{format.relative(email.scheduledAt)}</span>
+        <span>{format.absolute(email.scheduledAt)}</span>
       </div>
       <StatusBadge status={email.status} />
       {email.status === "SENT" && email.testMessageUrl && (
