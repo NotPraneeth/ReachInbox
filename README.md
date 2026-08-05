@@ -6,109 +6,185 @@ A persistent, restart-safe email scheduler with per-sender rate limiting, built 
 
 ---
 
-## Features
+## Features Implemented
 
 ### Backend
-| Feature | Details |
-|---|---|
-| **Scheduling** | Campaigns are broken into per-recipient `EmailMessage` rows with precomputed `scheduledAt` times. BullMQ delayed jobs fire each message at the right moment. |
-| **Persistence on restart** | Boot-time reconciliation re-enqueues any `PENDING` rows missing from Redis, and resets stuck `PROCESSING` rows. No scheduled email is ever lost. |
-| **Rate limiting** | Two-layer system: a BullMQ queue-level `limiter` caps global throughput (ms between sends), and a per-sender Redis `INCR` counter enforces an hourly cap. Both layers are race-safe across multiple worker processes. |
-| **Concurrency** | Configurable `WORKER_CONCURRENCY` (default 5). Idempotency is guaranteed by a DB `UPDATE WHERE status='PENDING'` guard before each SMTP call — prevents double-sends even when BullMQ re-assigns a stalled job. |
-| **Google OAuth** | Passport.js + Redis-backed sessions. New users get two Ethereal test senders auto-provisioned on first login. |
-| **CSV / plain-text lead parsing** | Upload a `.csv` or `.txt` file to extract and validate recipient emails. |
-| **Email cancellation** | Cancel any `PENDING` email from the UI; removes the job from BullMQ and marks the DB row `CANCELLED`. |
-| **Ethereal preview links** | The Nodemailer test preview URL is stored in the DB and surfaced on each sent email row — click to open the email in Ethereal without digging through logs. |
+
+| Feature | Component | Details |
+|---|---|---|
+| **Scheduler** | `services/scheduler.service.ts`, `lib/computeSchedule.ts` | On campaign submit, `computeSchedule()` distributes all recipients across time slots (respecting delay + hourly limit), bulk-inserts all `EmailMessage` rows in one DB round-trip, and bulk-enqueues all BullMQ delayed jobs at once. |
+| **Persistence on restart** | `services/reconcile.ts`, `worker.ts` | On every worker boot, `reconcilePendingMessages()` re-enqueues any `PENDING` rows missing from Redis and resets stuck `PROCESSING` rows. No scheduled email is ever lost, even after a full Redis flush. |
+| **Rate limiting** | `services/rateLimiter.service.ts`, `services/queue.ts` | Two-layer: a BullMQ `limiter` caps global queue throughput (ms between sends), and a per-sender Redis `INCR` counter enforces an hourly cap. When the cap is hit, the same job is re-delayed to the next clock-hour window via `job.moveToDelayed()`. |
+| **Concurrency & idempotency** | `services/processor.ts` | `WORKER_CONCURRENCY` (default 5) controls parallel job slots. A DB `UPDATE WHERE status='PENDING'` guard immediately before each SMTP call ensures that even if BullMQ hands a stalled job to two workers, only one sends. |
+| **Google OAuth + sessions** | `auth.ts`, `routes/auth.ts` | Passport.js + Redis-backed sessions (`connect-redis`). New users get two Ethereal test senders auto-provisioned on first login. |
+| **CSV / plain-text lead parsing** | `lib/parseLeads.ts`, `routes/leads.ts` | Upload `.csv` or `.txt` to extract and validate recipient emails; invalid rows are counted and reported. |
+| **Email cancellation** | `routes/emails.ts` | `DELETE /api/emails/:id` removes the BullMQ job and marks the DB row `CANCELLED`. Only `PENDING` rows can be cancelled. |
+| **Ethereal preview links** | `services/email.service.ts`, `services/processor.ts` | `nodemailer.getTestMessageUrl()` is stored in the `EmailMessage` row and returned by the API so the frontend can link directly to the Ethereal preview. |
 
 ### Frontend
-| Feature | Details |
-|---|---|
-| **Login page** | Google Sign-In button; email/password fields rendered for visual fidelity but intentionally disabled. |
-| **Dashboard** | Sidebar navigation with live badge counts for scheduled and sent emails. |
-| **Compose** | Rich text editor (Tiptap), recipient chips, CSV/TXT uploader, sender dropdown, delay & hourly-limit inputs, and a "Send Later" date-time popover. |
-| **Scheduled table** | Paginated, searchable list of `PENDING`/`PROCESSING` emails with cancel button per row. |
-| **Sent table** | Paginated, searchable list of `SENT`/`FAILED` emails. SENT rows show an **↗ Ethereal preview link** to view the email in a browser tab. |
-| **Status badges** | Colour-coded `PENDING`, `PROCESSING`, `SENT`, `FAILED`, `CANCELLED` badges. |
+
+| Feature | Component | Details |
+|---|---|---|
+| **Login page** | `app/login/page.tsx`, `components/auth/GoogleSignIn.tsx` | Google Sign-In button. Email/password fields are rendered for visual fidelity but intentionally disabled. |
+| **Dashboard layout** | `app/dashboard/layout.tsx`, `components/layout/Sidebar.tsx` | Sidebar navigation with live badge counts for scheduled and sent emails, user avatar, and sign-out. |
+| **Compose** | `app/dashboard/compose/page.tsx`, `components/compose/` | Rich text editor (Tiptap), recipient chips (paste/type), CSV/TXT uploader, sender dropdown, per-sender delay and hourly-limit inputs, and a "Send Later" date-time popover. |
+| **Scheduled table** | `app/dashboard/scheduled/page.tsx`, `components/emails/EmailListView.tsx` | Paginated, searchable list of `PENDING`/`PROCESSING` emails. Each row has a cancel button that removes the job and refreshes the list. |
+| **Sent table** | `app/dashboard/sent/page.tsx`, `components/emails/EmailRow.tsx` | Paginated, searchable list of `SENT`/`FAILED` emails. `SENT` rows show an ↗ icon that opens the Ethereal preview in a new tab. |
+| **Status badges** | `components/emails/StatusBadge.tsx` | Colour-coded `PENDING`, `PROCESSING`, `SENT`, `FAILED`, `CANCELLED` badges. |
+| **API client** | `lib/apiClient.ts` | Typed fetch wrapper with `ApiError` for structured error handling; all requests use `credentials: "include"` for cookie auth. |
 
 ---
 
 ## Architecture Overview
 
-```
-Browser
-  │  REST + session cookie (credentials: "include")
-  ▼
-Next.js 14  (port 3000)
-  │  server-side proxy: /api/* and /auth/* → api:4000
-  ▼
-Express API  (port 4000)
-  ├─ /auth/google*              Google OAuth via Passport
-  ├─ /api/me                    Current user
-  ├─ /api/senders               Sender list
-  ├─ /api/config/defaults       Scheduling bounds
-  ├─ /api/leads/parse           CSV/TXT → email list
-  ├─ /api/campaigns             POST: create & schedule campaign
-  └─ /api/emails/{scheduled,sent,counts,/:id}
-          │
-          ├──────────────────────────────────────┐
-          ▼                                      ▼
-     PostgreSQL (Prisma)                  Redis (ioredis)
-     User, Sender, Campaign,              BullMQ queue state
-     EmailMessage (with scheduledAt,      Rate-limit counters (INCR)
-     status, testMessageUrl …)            Session store
-          │                                      │
-          └──────────────────┬───────────────────┘
-                             ▼
-                       BullMQ Worker  (separate process)
-                       reconcile() → processMessage()
-                             │
-                             ▼
-                       Nodemailer → Ethereal SMTP
-                       (testMessageUrl stored in DB)
+```mermaid
+flowchart LR
+    subgraph Client
+        FE["Next.js Dashboard\n(React + Tailwind + TS)"]
+    end
+
+    subgraph API["Express API"]
+        AUTHR["/auth/google*"]
+        CAMPR["/api/campaigns\n/api/emails/*"]
+        SCHED["Scheduler Service\n(batch precompute)"]
+    end
+
+    subgraph Data
+        PG[("PostgreSQL\nsource of truth")]
+        REDIS[("Redis\nqueue + rate counters")]
+    end
+
+    subgraph WorkerProc["Worker process (separate from API)"]
+        BULLW["BullMQ Worker\n(concurrency + limiter)"]
+        RL["Rate Limiter Service\n(Redis INCR per hour-window)"]
+        MAILER["Nodemailer"]
+        RECON["Startup Reconciliation\n(runs once on boot)"]
+    end
+
+    ETHEREAL[["Ethereal SMTP\n(fake, for testing)"]]
+    GOOGLE[["Google OAuth"]]
+
+    FE -- "REST + session cookie" --> AUTHR
+    FE -- "REST + session cookie" --> CAMPR
+    AUTHR --> GOOGLE
+    CAMPR --> SCHED
+    SCHED -- "createMany" --> PG
+    SCHED -- "addBulk (delayed jobs)" --> REDIS
+    REDIS --> BULLW
+    BULLW <--> RL
+    RL <--> REDIS
+    BULLW -- "status transitions" --> PG
+    BULLW --> MAILER --> ETHEREAL
+    RECON -- "reconcile vs DB" --> PG
+    RECON --> REDIS
 ```
 
 The **API** and **Worker** run as separate processes. This is intentional — the worker can be killed and restarted without affecting the API, and reconciliation fires on every worker boot.
 
 ### Email status lifecycle
 
-```
-PENDING ──► PROCESSING ──► SENT
-                       └──► FAILED   (retries exhausted)
-PENDING ──► PENDING          (hourly cap hit → re-delayed to next hour window)
-PENDING ──► CANCELLED        (user cancels via UI)
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: campaign created (scheduledAt precomputed)
+    PENDING --> PROCESSING: worker claims job, passes rate check
+    PROCESSING --> SENT: SMTP accepted
+    PROCESSING --> FAILED: SMTP error, retries exhausted
+    PENDING --> PENDING: hourly cap hit → moveToDelayed to next window
+    PENDING --> CANCELLED: user cancels via UI
+    SENT --> [*]
+    FAILED --> [*]
+    CANCELLED --> [*]
 ```
 
 ---
 
 ## How Scheduling Works
 
+### Batch precomputation (on campaign submit)
+
 When you submit the compose form, `POST /api/campaigns` calls `createScheduledCampaign()`:
 
-1. **`computeSchedule()`** distributes recipients across time slots, respecting `delayBetweenEmailsSec` and `hourlyLimit`. If more emails are requested than the hourly limit allows, the overflow spills into the next hour window, and so on.
-2. A single `Campaign` row is created, then all `EmailMessage` rows are bulk-inserted (`createManyAndReturn`) in one DB round-trip.
+1. **`computeSchedule()`** distributes recipients across time slots, respecting `delayBetweenEmailsSec` and `hourlyLimit`. Overflow past the hourly cap spills into the next hour window automatically.
+2. A single `Campaign` row is created, then all `EmailMessage` rows are **bulk-inserted** in one DB round-trip.
 3. All jobs are **bulk-enqueued** to BullMQ with `delay = scheduledAt - now` and `jobId = EmailMessage.id`.
 
-When a job's delay expires, the worker's `processMessage()` runs:
-- Checks the DB row is still `PENDING` (idempotency guard #1).
-- Atomically increments the per-sender hourly Redis counter. If over the cap, releases the slot and calls `job.moveToDelayed(nextHourBoundary)` + throws `DelayedError` — the **same job** is re-delayed, not replaced.
-- Claims the row with `UPDATE WHERE status='PENDING'` → `PROCESSING` (idempotency guard #2 — prevents double-sends across concurrent workers).
-- Sends via Nodemailer/Ethereal and stores `testMessageUrl`.
-- Marks the row `SENT` or `FAILED`.
+```
+computeSchedule(recipients, startTime, delaySec, hourlyLimit):
+    bucketCounts = {}
+    cursor = startTime
+    for recipient in recipients:
+        candidate = max(cursor, startTime)
+        bucket = floorToHour(candidate)
+        while bucketCounts[bucket] >= hourlyLimit:
+            bucket = bucket + 1 hour       # spill into next window
+            candidate = bucket.start
+        bucketCounts[bucket] += 1
+        emit { recipient, scheduledAt: candidate }
+        cursor = candidate + delaySec
+```
+
+**Example:** 1,000 recipients, `delaySec=2`, `hourlyLimit=200` → first 200 land ~2 s apart inside hour-window 1, recipient #201 rolls to hour-window 2, and so on. Fully drained in 5 windows.
+
+### Authoritative rate check at send time (in the worker)
+
+The precomputed `scheduledAt` is a plan, not a guarantee — multiple campaigns can share a sender in the same window. The worker re-checks atomically before every send:
+
+```
+processor(job, token):
+    message = db.find(job.data.messageId)
+    if message.status != PENDING: return           # idempotency guard #1
+
+    count = redis.incr("rl:hour:<window>:<senderId>")
+    if count == 1: redis.expire(key, 7200)         # safety TTL
+
+    if count > hourlyLimit:
+        redis.decr(key)                            # release the slot
+        db.update(message.id, { scheduledAt: nextHourBoundary })
+        job.moveToDelayed(nextHourBoundary, token) # re-delay the SAME job
+        throw DelayedError()                       # BullMQ won't complete/fail it
+
+    claimed = db.updateMany({                      # idempotency guard #2
+        where: { id: message.id, status: 'PENDING' },
+        data:  { status: 'PROCESSING' }
+    })
+    if claimed.count == 0: return                  # another worker beat us
+
+    result = sendViaNodemailer(message)
+    db.update(message.id, { status: 'SENT', testMessageUrl: result.url })
+```
+
+`redis.incr` is atomic — race-safe across all concurrent worker processes. The DB `UPDATE WHERE status='PENDING'` guard is the final backstop against double-sends.
 
 ### Persistence on restart
 
 On every worker boot, `reconcilePendingMessages()` runs **once**:
 
-1. **Missing jobs:** Any `PENDING` row with no corresponding BullMQ job (e.g. Redis was flushed) is re-enqueued with its original `scheduledAt`. Because `jobId = EmailMessage.id`, a safe no-op if the job already exists.
-2. **Stuck PROCESSING rows:** Any row that has been `PROCESSING` for more than 5 minutes (crashed mid-send) is reset to `PENDING` and retried, or permanently marked `FAILED` after `MAX_RECONCILE_ATTEMPTS`.
+```
+on worker startup:
+    for m in db.findMany({ status: 'PENDING' }):
+        if queue.getJob(m.id) is null:             # Redis lost the job
+            queue.add({ jobId: m.id, delay: max(0, m.scheduledAt - now) })
+                                                   # safe no-op if job exists (deduped by jobId)
+
+    for m in db.findMany({ status: 'PROCESSING', updatedAt < now - 5min }):
+        if m.attemptCount < MAX_RECONCILE_ATTEMPTS:
+            db.update(m.id, { status: 'PENDING', attemptCount: +1 })
+            queue.add({ jobId: m.id, delay: 0 })
+        else:
+            db.update(m.id, { status: 'FAILED', failReason: 'stuck after restart' })
+```
 
 ### Rate limiting & concurrency
 
-**Layer 1 — Global throughput:** BullMQ `Worker` `limiter: { max, duration }` is set from `MIN_DELAY_BETWEEN_EMAILS_MS`. This is enforced in Redis, so it holds across any number of concurrent worker processes.
+**Layer 1 — Global throughput:** BullMQ `Worker` `limiter: { max, duration }` is set from `MIN_DELAY_BETWEEN_EMAILS_MS`. Enforced centrally in Redis — holds across any number of concurrent worker processes.
 
-**Layer 2 — Per-sender hourly cap:** A Redis key `rl:hour:<windowStart>:<senderId>` is atomically `INCR`'d before each send. If the count exceeds `MAX_EMAILS_PER_HOUR_PER_SENDER`, the slot is `DECR`'d back and the job is re-delayed to the start of the next clock-hour window. The key expires automatically after 2 hours (safety TTL).
+**Layer 2 — Per-sender hourly cap:** Redis key `rl:hour:<windowStart>:<senderId>` is atomically `INCR`'d before each send. Over-cap jobs are re-delayed to the next clock-hour window via `job.moveToDelayed()` (same job, no duplicate ID).
 
-**Concurrency safety:** `INCR` in Redis is atomic — no two workers can claim the same slot simultaneously. The DB `UPDATE WHERE status='PENDING'` guard is the final backstop against double-sends from stalled job re-assignment.
+| Concern | Mechanism | Trade-off |
+|---|---|---|
+| Global throughput | BullMQ `limiter` | Enforced in Redis — holds across processes/machines |
+| Per-sender hourly cap | Custom Redis `INCR` | BullMQ Pro's per-group rate limiting was removed from open-source BullMQ v3; custom INCR is free and race-safe |
+| Clock-hour vs. rolling window | Fixed clock-hour bucket | Simpler to reason about; minor burst possible at the hour boundary |
 
 ---
 
