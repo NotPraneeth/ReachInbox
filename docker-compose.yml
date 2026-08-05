@@ -1,3 +1,42 @@
+# =============================================================================
+# ReachInbox — production deployment (Docker Compose)
+#
+# Runs the full stack on one host:
+#   caddy (HTTPS) -> web (Next.js standalone) -> api (Express)  ┐
+#                                                         db-migrate (one-off)
+#   worker (BullMQ) ─────────────────────────────────────────────┘
+#   postgres (16) + redis (7, AOF)                              (data + queue)
+#
+# Only Caddy is exposed publicly (the site you visit). The api, worker and
+# frontend live on the internal compose network and reference each other by
+# service name, so the Next.js rewrites stay same-origin (cookies just work).
+#
+# Bring it up:
+#   cp .env.production.example .env       # fill in real values
+#   docker compose up -d --build
+#   docker compose run --rm api npm run seed   # one-time: dev user + senders
+# =============================================================================
+
+x-backend-env: &backend-env
+  NODE_ENV: production
+  PORT: "4000"
+  DATABASE_URL: ${DATABASE_URL:-postgresql://reachinbox:reachinbox@postgres:5432/reachinbox}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  FRONTEND_URL: ${FRONTEND_URL:-https://${DOMAIN:-localhost}}
+  SESSION_SECRET: ${SESSION_SECRET:-change-me-production}
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-https://${DOMAIN:-localhost}/auth/google/callback}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+  MIN_DELAY_BETWEEN_EMAILS_MS: ${MIN_DELAY_BETWEEN_EMAILS_MS:-5000}
+  RATE_LIMIT_MODE: ${RATE_LIMIT_MODE:-per_sender}
+  MAX_EMAILS_PER_HOUR: ${MAX_EMAILS_PER_HOUR:-200}
+  MAX_EMAILS_PER_HOUR_PER_SENDER: ${MAX_EMAILS_PER_HOUR_PER_SENDER:-150}
+  MAX_RECONCILE_ATTEMPTS: ${MAX_RECONCILE_ATTEMPTS:-3}
+  ETHEREAL_AUTO_CREATE: ${ETHEREAL_AUTO_CREATE:-true}
+  ETHEREAL_HOST: ${ETHEREAL_HOST:-smtp.ethereal.email}
+  ETHEREAL_PORT: ${ETHEREAL_PORT:-587}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -32,6 +71,71 @@ services:
       timeout: 5s
       retries: 10
 
+  # One-shot: apply Prisma migrations, then exit. api and worker start only
+  # after this succeeds, so the schema always exists before anything boots.
+  db-migrate:
+    build: ./backend
+    command: ["sh", "-c", "npx prisma migrate deploy"]
+    environment: *backend-env
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    command: ["node", "dist/index.js"]
+    restart: unless-stopped
+    environment: *backend-env
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    expose:
+      - "4000"
+
+  worker:
+    build: ./backend
+    command: ["node", "dist/worker.js"]
+    restart: unless-stopped
+    environment: *backend-env
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    expose:
+      - "4001"
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_URL: ${WEB_BACKEND_URL:-http://api:4000}
+    restart: unless-stopped
+    depends_on:
+      - api
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
 volumes:
   pgdata:
   redisdata:
+  caddy_data:
+  caddy_config:

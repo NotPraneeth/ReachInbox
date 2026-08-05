@@ -201,6 +201,79 @@ The reconciliation is idempotent: if the job already exists in Redis, `queue.add
 
 ---
 
+## Free Hosting / Deployment
+
+The repo ships with everything needed to run the full stack on a single free
+Docker host behind Caddy (automatic HTTPS). The recommended target is an
+**Oracle Cloud Always Free** `VM.Standard.A1.Flex` (2 OCPU / 12 GB RAM) running
+Docker, which keeps the BullMQ worker alive 24/7 so scheduled emails fire on
+time. Signup requires a card for identity verification only; Always Free usage
+is never billed.
+
+### What you get
+
+```
+Internet ──<443>── caddy (HTTPS, auto Let's Encrypt)
+                         │  -> web (Next.js standalone, :3000)
+                         │        rewrites /api & /auth -> api:4000
+                         └─ compose network
+                              ├─ db-migrate (one-shot: `prisma migrate deploy`)
+                              ├─ api   (Express, :4000)
+                              ├─ worker(BullMQ, separate process)
+                              ├─ postgres (16, AOF via pgdata volume)
+                              └─ redis    (7, AOF)
+```
+
+Only Caddy publishes ports to the internet; the app services stay internal to
+the compose network. Because the frontend proxies the backend server-side, the
+browser only ever talks to the frontend origin, so session cookies stay
+first-party with no CORS setup.
+
+### Files added
+
+| File | Purpose |
+|---|---|
+| `backend/Dockerfile` | Multi-stage build (prisma generate → tsc → slim runtime) |
+| `frontend/Dockerfile` | Next.js `standalone` build (copies `.next/static`) |
+| `Caddyfile` | HTTPS reverse proxy; site name from the `DOMAIN` env var |
+| `docker-compose.yml` | Adds `db-migrate`, `api`, `worker`, `web`, `caddy` alongside Postgres + Redis |
+| `.env.example` | Production env template (copied to `.env`) |
+| `frontend/next.config.mjs` | Backend proxy target is now `BACKEND_URL`-driven + `output: "standalone"` |
+
+### Deploy steps
+
+```bash
+# 1. Provision an Always Free VM (home region), open TCP 22/80/443, SSH in.
+
+# 2. Add https://<DOMAIN>/auth/google/callback to your Google Console
+#    Authorized redirect URIs.
+
+# 3. On the VM, install Docker + compose plugin, then:
+git clone <your-repo> ReachInbox && cd ReachInbox
+cp .env.example .env
+#   edit .env: set DOMAIN, GOOGLE_CLIENT_ID/SECRET, SESSION_SECRET
+
+# 4. Build and start everything
+docker compose up -d --build
+
+# 5. One-time seed (dev user + Ethereal senders; idempotent)
+docker compose run --rm api npm run seed
+
+# 6. Open https://<DOMAIN>, sign in with Google, compose & schedule an email.
+```
+
+Migrations run automatically via the `db-migrate` one-shot service. On restart,
+the worker re-runs `reconcilePendingMessages()` so no scheduled email is lost
+even if Redis was flushed.
+
+**Free-tier realities (2026):** always-on worker requires a persistent host
+(Oracle Always Free / a free VM). PaaS free tiers (Render, Koyeb) scale to zero
+on idle and would delay scheduled emails until woken; they're only suited to a
+catch-up demo. Emails use Ethereal (a fake SMTP sink), so no real provider is
+needed and nothing to pay for.
+
+---
+
 ## Key Design Decisions
 
 | Decision | Choice | Rationale |

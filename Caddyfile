@@ -1,0 +1,13 @@
+# Reverse proxy for the ReachInbox app. Caddy terminates TLS (automatic
+# Let's Encrypt) and routes all traffic to the Next.js frontend, which
+# proxies /api and /auth to the backend over the internal Docker network.
+#
+# The site name is supplied by the `DOMAIN` environment variable set in
+# docker-compose.yml. Use your real domain, or a free wildcard like
+# https://123.45.67.89.sslip.io for a quick always-free test.
+
+{$DOMAIN} {
+    encode gzip
+
+    reverse_proxy web:3000
+}
